@@ -2,10 +2,10 @@
 // azure and openai, using same models. so using same LLMApi.
 import {
   ApiPath,
-  OPENAI_BASE_URL,
-  DEFAULT_MODELS,
-  OpenaiPath,
   Azure,
+  DEFAULT_MODELS,
+  OPENAI_BASE_URL,
+  OpenaiPath,
   REQUEST_TIMEOUT_MS,
   ServiceProvider,
 } from "@/app/constant";
@@ -18,13 +18,13 @@ import {
 } from "@/app/store";
 import { collectModelsWithDefaultModel } from "@/app/utils/model";
 import {
-  preProcessImageContent,
-  uploadImage,
   base64Image2Blob,
-  stream,
+  preProcessImageContent,
+  streamWithThink,
+  uploadImage,
 } from "@/app/utils/chat";
 import { cloudflareAIGatewayUrl } from "@/app/utils/cloudflare";
-import { ModelSize, DalleQuality, DalleStyle } from "@/app/typing";
+import { DalleQuality, DalleStyle, ModelSize } from "@/app/typing";
 
 import {
   ChatOptions,
@@ -39,8 +39,9 @@ import Locale from "../../locales";
 import { getClientConfig } from "@/app/config/client";
 import {
   getMessageTextContent,
-  isVisionModel,
+  getMessageTextContentWithoutThinking,
   isDalle3 as _isDalle3,
+  isVisionModel,
 } from "@/app/utils";
 import { fetch } from "@/app/utils/stream";
 
@@ -66,6 +67,7 @@ export interface RequestPayload {
   top_p: number;
   max_tokens?: number;
   max_completion_tokens?: number;
+  include_reasoning?: boolean;
 }
 
 export interface DalleRequestPayload {
@@ -195,7 +197,9 @@ export class ChatGPTApi implements LLMApi {
     let requestPayload: RequestPayload | DalleRequestPayload;
 
     const isDalle3 = _isDalle3(options.config.model);
-    const isO1OrO3 = options.config.model.startsWith("o1") || options.config.model.startsWith("o3");
+    const isO1OrO3 =
+      options.config.model.startsWith("o1") ||
+      options.config.model.startsWith("o3");
     if (isDalle3) {
       const prompt = getMessageTextContent(
         options.messages.slice(-1)?.pop() as any,
@@ -216,6 +220,8 @@ export class ChatGPTApi implements LLMApi {
       for (const v of options.messages) {
         const content = visionModel
           ? await preProcessImageContent(v.content)
+          : v.role === "assistant"
+          ? getMessageTextContentWithoutThinking(v)
           : getMessageTextContent(v);
         if (!(isO1OrO3 && v.role === "system"))
           messages.push({ role: v.role, content });
@@ -232,6 +238,7 @@ export class ChatGPTApi implements LLMApi {
         top_p: !isO1OrO3 ? modelConfig.top_p : 1,
         // max_tokens: Math.max(modelConfig.max_tokens, 1024),
         // Please do not ask me why not send max_tokens, no reason, this param is just shit, I dont want to explain anymore.
+        include_reasoning: true,
       };
 
       // O1 使用 max_completion_tokens 控制token数 (https://platform.openai.com/docs/guides/reasoning#controlling-costs)
@@ -291,7 +298,7 @@ export class ChatGPTApi implements LLMApi {
             useChatStore.getState().currentSession().mask?.plugin || [],
           );
         // console.log("getAsTools", tools, funcs);
-        stream(
+        streamWithThink(
           chatPath,
           requestPayload,
           getHeaders(),
@@ -306,6 +313,7 @@ export class ChatGPTApi implements LLMApi {
               delta: {
                 content: string;
                 tool_calls: ChatMessageTool[];
+                reasoning: string | null;
               };
             }>;
             const tool_calls = choices[0]?.delta?.tool_calls;
@@ -327,7 +335,21 @@ export class ChatGPTApi implements LLMApi {
                 runTools[index]["function"]["arguments"] += args;
               }
             }
-            return choices[0]?.delta?.content;
+            // return choices[0]?.delta?.content;
+            const reasoning = choices[0]?.delta?.reasoning;
+            const content = choices[0]?.delta?.content;
+
+            if (reasoning) {
+              return {
+                isThinking: true,
+                content: reasoning,
+              };
+            } else {
+              return {
+                isThinking: false,
+                content: content,
+              };
+            }
           },
           // processToolMessage, include tool_calls message and tool call results
           (
@@ -374,6 +396,7 @@ export class ChatGPTApi implements LLMApi {
       options.onError?.(e as Error);
     }
   }
+
   async usage() {
     const formatDate = (d: Date) =>
       `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, "0")}-${d
@@ -477,4 +500,5 @@ export class ChatGPTApi implements LLMApi {
     }));
   }
 }
+
 export { OpenaiPath };
